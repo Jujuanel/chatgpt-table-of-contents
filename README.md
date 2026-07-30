@@ -12,11 +12,11 @@ Once the conversation reaches five user messages, the script stops rendering its
 
 ### Collapsed rail / 折叠短条
 
-![Table of Contents](assets/Table of Contents - 1.png)
+![Collapsed rail](assets/table-of-contents-1.png)
 
 ### Expanded panel / 展开面板
 
-![Table of Contents](assets/Table of Contents - 2.png)
+![Expanded panel](assets/table-of-contents-2.png)
 
 ## Install / 安装
 
@@ -24,9 +24,9 @@ Once the conversation reaches five user messages, the script stops rendering its
 
    安装 [Tampermonkey](https://www.tampermonkey.net/) 用户脚本管理器。
 
-2. Install: [ChatGPT Table of Contents on Greasy Fork](https://greasyfork.org/scripts/589167-chatgpt-table-of-contents)
+2. Install Greasy Fork Script: [ChatGPT Table of Contents on Greasy Fork](https://greasyfork.org/scripts/589167-chatgpt-table-of-contents)
 
-   安装：在 Greasy Fork 安装 [ChatGPT 对话目录](https://greasyfork.org/scripts/589167-chatgpt-table-of-contents)。
+   安装油叉脚本：在 Greasy Fork 安装 [ChatGPT 对话目录](https://greasyfork.org/scripts/589167-chatgpt-table-of-contents)。
 
 3. Confirm installation, then refresh [ChatGPT](https://chatgpt.com/).
 
