@@ -37,3 +37,8 @@ Once the conversation reaches five user messages, the script stops rendering its
 Released under the MIT License.
 
 基于 MIT 许可证发布。
+
+
+
+> 致谢：
+> [LINUX DO](https://linux.do)
