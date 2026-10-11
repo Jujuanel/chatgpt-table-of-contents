@@ -2,9 +2,9 @@
 // @name         ChatGPT Table of Contents
 // @name:zh-CN   ChatGPT 对话目录
 // @namespace    https://github.com/Jujuanel/chatgpt-table-of-contents
-// @version      1.0.0
-// @description  Show ChatGPT's native-style Table of contents for the first four prompts, then hand off completely to ChatGPT's native component.
-// @description:zh-CN 从第一条提问开始显示 ChatGPT 网页版右侧的对话目录，不必等到第五条提问。参考网页版原生样式实现。
+// @version      2.0.0
+// @description  Show a native-style Table of contents on the right of ChatGPT conversations, starting from the first prompt and covering the whole conversation.
+// @description:zh-CN 在 ChatGPT 网页版右侧显示对话目录，从第一条提问开始，覆盖整个对话。参考网页版原生样式实现。
 // @author       Jujuanel
 // @license      MIT
 // @match        https://chatgpt.com/*
@@ -16,64 +16,225 @@
 (() => {
   "use strict";
 
-  const ROOT_ID = "chatgpt-table-of-contents-fallback";
-  const TURN_CONTAINER_SELECTOR =
-    "[data-turn-id-container][data-is-intersecting]";
-  const USER_MESSAGE_SELECTOR = '[data-message-author-role="user"]';
-  const ASSISTANT_MESSAGE_SELECTOR =
-    '[data-message-author-role="assistant"]';
-  const STOP_BUTTON_SELECTOR = 'button[data-testid="stop-button"]';
-  const NATIVE_MARKER_SELECTOR = "button[data-toc-item-index]";
-  const ACTIVE_RELEVANT_NODE_SELECTOR =
-    `${TURN_CONTAINER_SELECTOR}, ${NATIVE_MARKER_SELECTOR}, ` +
-    `${USER_MESSAGE_SELECTOR}, ${ASSISTANT_MESSAGE_SELECTOR}, #thread`;
-  const HANDOFF_RELEVANT_NODE_SELECTOR =
-    `${TURN_CONTAINER_SELECTOR}, ${USER_MESSAGE_SELECTOR}, ` +
-    NATIVE_MARKER_SELECTOR;
-  const HANDOFF_ATTRIBUTE_NAMES = new Set([
-    "data-message-author-role",
-    "data-message-id",
-    "data-toc-item-index",
-    "data-turn-id-container",
-  ]);
-  const NATIVE_THRESHOLD = 5;
+  const ROOT_ID = "chatgpt-table-of-contents";
+  const STYLE_ID = `${ROOT_ID}-style`;
+  const SCROLLER_SELECTOR = ".thread-scroll-container";
+  const TURN_SELECTOR = "[data-turn-key]";
+  const BUBBLE_SELECTOR = "[data-user-message-bubble]";
+  const HEADER_SELECTOR = "header[data-app-shell-titlebar]";
+  const CONVERSATION_ATTRIBUTE = "data-chatgpt-selection-conversation-id";
+  const CONVERSATION_PATH_PATTERN = /\/c\/([0-9a-f-]{36})(?:[/?#]|$)/i;
+  const VISIBLE_CONTENT_TYPES = new Set(["text", "multimodal_text"]);
   const LABEL_LIMIT = 60;
   const CLOSE_DELAY = 250;
   const SCROLL_OFFSET = 16;
+  const EDGE_OFFSET = 16;
+  const SEEK_TIMEOUT = 8000;
+  const REFETCH_DELAY = 800;
   const desktop = window.matchMedia("(min-width: 1024px)");
+
+  const STYLE = `
+    #${ROOT_ID} {
+      position: fixed;
+      z-index: 20;
+      transform: translateY(-50%);
+    }
+    #${ROOT_ID} .ctoc-shell {
+      position: relative;
+      display: flex;
+      align-items: flex-start;
+    }
+    #${ROOT_ID} .ctoc-rail {
+      width: 36px;
+      overflow: hidden;
+    }
+    #${ROOT_ID} .ctoc-markers {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 0;
+    }
+    #${ROOT_ID} .ctoc-marker {
+      flex-shrink: 0;
+      width: 18px;
+      height: 2px;
+      padding: 0;
+      border: 0;
+      border-radius: 9999px;
+      background-color: color-mix(
+        in srgb,
+        var(--color-token-text-tertiary) 60%,
+        transparent
+      );
+      cursor: pointer;
+      transition: all 150ms cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    #${ROOT_ID} .ctoc-marker:hover {
+      background-color: var(--color-token-text-secondary);
+    }
+    #${ROOT_ID} .ctoc-marker[data-active] {
+      background-color: var(--color-token-text-primary);
+    }
+    #${ROOT_ID} .ctoc-panel {
+      position: absolute;
+      top: 50%;
+      inset-inline-end: 0;
+      z-index: 10;
+      min-width: 240px;
+      max-width: 340px;
+      padding: 6px 0;
+      border-radius: 16px;
+      background-color: var(--color-token-main-surface-primary);
+      box-shadow:
+        0 8px 16px 0 rgba(0, 0, 0, 0.08),
+        0 0 1px 0 rgba(0, 0, 0, 0.62);
+      transform: translateY(-50%);
+      user-select: none;
+    }
+    :root[data-theme="dark"] #${ROOT_ID} .ctoc-panel {
+      background-color: #353535;
+    }
+    #${ROOT_ID} .ctoc-menu {
+      display: flex;
+      flex-direction: column;
+      margin: 0;
+      padding: 0;
+      overflow-y: auto;
+      list-style: none;
+    }
+    #${ROOT_ID} .ctoc-item {
+      display: flex;
+      align-items: center;
+      width: calc(100% - 12px);
+      min-height: 40px;
+      margin: 0 6px;
+      padding: 8px 10px;
+      border: 0;
+      border-radius: 10px;
+      background: transparent;
+      color: var(--color-token-text-primary);
+      font: inherit;
+      font-size: 16px;
+      line-height: 24px;
+      text-align: start;
+      cursor: pointer;
+      outline: none;
+    }
+    #${ROOT_ID} .ctoc-item:hover,
+    #${ROOT_ID} .ctoc-item:focus-visible,
+    #${ROOT_ID} .ctoc-item[data-active] {
+      background-color: var(--color-background-primary-ghost-hover);
+    }
+    #${ROOT_ID} .ctoc-label {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  `;
 
   let root = null;
   let items = [];
   let activeItemId = null;
+  let lockedItemId = null;
   let hovered = false;
   let focusTarget = null;
   let closeTimer = 0;
   let updateFrame = 0;
-  let handoffFrame = 0;
+  let activeFrame = 0;
   let jumpFrame = 0;
   let jumpRequest = 0;
   let renderedSignature = "";
-  let observedTurnSignature = "";
-  let observedTurns = [];
-  let observedScrollRoot = null;
-  let turnObserver = null;
-  let activeObserver = null;
-  let handoffObserver = null;
-  let mode = "fallback";
-  let intersectingTurnIds = new Set();
-  let lastUrl = location.href;
-  let labelCache = new Map();
-  let transientTurnIds = new Set();
+  let observedScroller = null;
+  let accessToken = null;
+  let conversation = createConversationState(null);
 
+  const resizeObserver = new ResizeObserver(() => positionRoot());
   const mediaPointerPattern =
     /\[media pointer=(?:"[^"\n]*"|'[^'\n]*'|[^\]\n]+)\]?/gi;
   const filePointerPattern = /\b(?:sediment|file):\/\/[^\s\]]+/gi;
+  const numericEntityPattern = /&#(?:x([0-9a-f]+)|(\d+));/gi;
+
+  function createConversationState(id) {
+    return {
+      id,
+      mapping: null,
+      currentNode: null,
+      loading: false,
+      reloadQueued: false,
+      refetchTimer: 0,
+      requestedKeys: new Set(),
+      domLabels: new Map(),
+    };
+  }
+
+  function getConversationId() {
+    return location.pathname.match(CONVERSATION_PATH_PATTERN)?.[1] || null;
+  }
 
   function truncateLabel(text) {
     const label = text.trim();
     return label.length > LABEL_LIMIT
       ? `${label.slice(0, LABEL_LIMIT - 3)}...`
       : label;
+  }
+
+  function getTextLabel(raw) {
+    const clean = raw
+      .replace(numericEntityPattern, (_, hex, decimal) =>
+        String.fromCodePoint(Number.parseInt(hex ?? decimal, hex ? 16 : 10)),
+      )
+      .replace(mediaPointerPattern, " ")
+      .replace(filePointerPattern, " ");
+
+    const heading = clean.match(/^#{1,3}\s+(.+)$/m)?.[1];
+    const firstContentLine =
+      heading ||
+      clean
+        .split(/\n+/)
+        .find((line) => line.trim().length > 0)
+        ?.replace(/^\s*>+\s*/, "")
+        .replace(/^\s*[-*+]\s+/, "") ||
+      "";
+
+    return truncateLabel(firstContentLine);
+  }
+
+  function getBubbleLabel(bubble) {
+    if (!bubble) return "";
+
+    const label = getTextLabel(bubble.innerText || bubble.textContent || "");
+    if (label) return label;
+    if (bubble.querySelector("img")) return "Image upload";
+    return "";
+  }
+
+  function getApiMessageLabel(message) {
+    const parts = Array.isArray(message.content?.parts)
+      ? message.content.parts
+      : [];
+    const label = getTextLabel(
+      parts.filter((part) => typeof part === "string").join("\n"),
+    );
+    if (label) return label;
+    if (
+      parts.some(
+        (part) => part?.content_type === "image_asset_pointer",
+      )
+    ) {
+      return "Image upload";
+    }
+    if (message.metadata?.attachments?.length) return "File upload";
+    return "";
+  }
+
+  function isVisibleUserMessage(message) {
+    return (
+      message?.author?.role === "user" &&
+      VISIBLE_CONTENT_TYPES.has(message.content?.content_type) &&
+      !message.metadata?.is_visually_hidden_from_conversation
+    );
   }
 
   function enableOverflowTitle(label) {
@@ -103,301 +264,205 @@
     label.addEventListener("pointerdown", cancelMeasurement);
   }
 
-  function getTextLabel(raw) {
-    const clean = raw
-      .replace(mediaPointerPattern, " ")
-      .replace(filePointerPattern, " ");
+  async function getAccessToken(refresh) {
+    if (accessToken && !refresh) return accessToken;
 
-    const heading = clean.match(/^#{1,3}\s+(.+)$/m)?.[1];
-    const firstContentLine =
-      heading ||
-      clean
-        .split(/\n+/)
-        .find((line) => line.trim().length > 0)
-        ?.replace(/^\s*>+\s*/, "")
-        .replace(/^\s*[-*+]\s+/, "") ||
-      "";
-
-    return truncateLabel(firstContentLine);
-  }
-
-  function getMessageLabel(message) {
-    if (!message) return "";
-
-    const label = getTextLabel(
-      message.innerText || message.textContent || "",
-    );
-    if (label) return label;
-    if (message.querySelector("img")) return "Image upload";
-    if (message.querySelector('[data-testid*="file"], a[download]')) {
-      return "File upload";
+    const response = await fetch("/api/auth/session", {
+      credentials: "include",
+    });
+    if (!response.ok) {
+      throw new Error(`Session request failed: HTTP ${response.status}`);
     }
-    return "";
+    const session = await response.json();
+    if (!session?.accessToken) {
+      throw new Error("Session response has no access token");
+    }
+    accessToken = session.accessToken;
+    return accessToken;
   }
 
-  function getVirtualizedUserMessage(turn) {
-    const id = turn?.getAttribute("data-turn-id-container");
-    const fiberKey = turn
-      ? Object.getOwnPropertyNames(turn).find((key) =>
-          key.startsWith("__reactFiber$"),
-        )
-      : null;
-    const initialFiber = fiberKey ? turn[fiberKey] : null;
-    if (!id || !initialFiber) return null;
+  async function requestConversation(id) {
+    const send = async (refresh) =>
+      fetch(`/backend-api/conversation/${id}`, {
+        credentials: "include",
+        headers: {
+          Authorization: `Bearer ${await getAccessToken(refresh)}`,
+        },
+      });
 
-    const roots = [initialFiber, initialFiber.alternate].filter(
-      Boolean,
-    );
-    for (const rootFiber of roots) {
-      for (
-        let fiber = rootFiber;
-        fiber;
-        fiber = fiber.return
-      ) {
-        if (fiber.memoizedProps?.turnId !== id) continue;
+    let response = await send(false);
+    if (response.status === 401) response = await send(true);
+    if (!response.ok) {
+      throw new Error(
+        `Conversation request failed: HTTP ${response.status}`,
+      );
+    }
+    return response.json();
+  }
 
-        for (
-          let hook = fiber.memoizedState;
-          hook;
-          hook = hook.next
-        ) {
-          if (!Array.isArray(hook.memoizedState)) continue;
+  async function loadConversation() {
+    const state = conversation;
+    if (!state.id) return;
+    if (state.loading) {
+      state.reloadQueued = true;
+      return;
+    }
 
-          const turnModel = hook.memoizedState.find(
-            (candidate) =>
-              candidate?.id === id &&
-              Array.isArray(candidate.messages),
-          );
-          const message = turnModel?.messages.find(
-            (candidate) => candidate?.author?.role === "user",
-          );
-          if (!message) continue;
-
-          const parts = Array.isArray(message.content?.parts)
-            ? message.content.parts
-            : [];
-          const label = getTextLabel(
-            parts
-              .filter((part) => typeof part === "string")
-              .join("\n"),
-          );
-          if (!label) return null;
-
-          return {
-            label,
-            messageId:
-              typeof message.id === "string" ? message.id : null,
-          };
-        }
+    state.loading = true;
+    try {
+      const data = await requestConversation(state.id);
+      if (state !== conversation) return;
+      state.mapping = data.mapping;
+      state.currentNode = data.current_node;
+      scheduleUpdate();
+    } catch (error) {
+      console.error("[ChatGPT Table of Contents]", error);
+    } finally {
+      state.loading = false;
+      if (state === conversation && state.reloadQueued) {
+        state.reloadQueued = false;
+        loadConversation();
       }
     }
-
-    return null;
   }
 
-  function getAssistantFirstLineLabel(message) {
-    const firstBlock =
-      message?.querySelector(".markdown")?.firstElementChild;
-    if (firstBlock?.tagName !== "P") return "";
+  function scheduleRefetch() {
+    const state = conversation;
+    if (!state.id || state.refetchTimer) return;
 
-    const firstLine = (
-      firstBlock.innerText ||
-      firstBlock.textContent ||
-      ""
-    )
-      .split(/\r?\n/)
-      .find((line) => line.trim().length > 0);
-
-    return truncateLabel(firstLine || "");
+    state.refetchTimer = window.setTimeout(() => {
+      state.refetchTimer = 0;
+      if (state === conversation) loadConversation();
+    }, REFETCH_DELAY);
   }
 
-  function getTurnRole(turn) {
-    return (
-      turn.querySelector("[data-turn]")?.getAttribute("data-turn") ||
-      turn
-        .querySelector("[data-message-author-role]")
-        ?.getAttribute("data-message-author-role") ||
-      null
+  function getBranchPath(anchorId) {
+    const { mapping, currentNode } = conversation;
+    const currentPath = new Set();
+    for (let id = currentNode; id; id = mapping[id]?.parent) {
+      currentPath.add(id);
+    }
+
+    const start = anchorId && mapping[anchorId] ? anchorId : currentNode;
+    const path = [];
+    for (let id = start; id; id = mapping[id]?.parent) path.unshift(id);
+    for (let id = start; ; ) {
+      const children = mapping[id]?.children || [];
+      if (children.length === 0) break;
+      id =
+        children.find((child) => currentPath.has(child)) ??
+        children[children.length - 1];
+      path.push(id);
+    }
+    return path;
+  }
+
+  function getScroller() {
+    return Array.from(document.querySelectorAll(SCROLLER_SELECTOR)).find(
+      (scroller) => scroller.checkVisibility(),
     );
   }
 
-  function getTurnContainers() {
-    const thread = document.getElementById("thread");
-    if (!thread) return [];
-
-    return Array.from(
-      thread.querySelectorAll(TURN_CONTAINER_SELECTOR),
-    ).filter(
-      (turn) =>
-        turn.getAttribute("data-turn-id-container") &&
-        turn.getAttribute("data-turn-id-container") !== "client-created-root",
-    );
+  function belongsToConversation(turn) {
+    const owner = turn
+      .querySelector(`[${CONVERSATION_ATTRIBUTE}]`)
+      ?.getAttribute(CONVERSATION_ATTRIBUTE);
+    return !owner || owner === conversation.id;
   }
 
-  function inferUserParity(turns) {
-    const votes = [0, 0];
-
-    turns.forEach((turn, index) => {
-      const role = getTurnRole(turn);
-      if (role === "user") votes[index % 2] += 1;
-      if (role === "assistant") votes[(index + 1) % 2] += 1;
-    });
-
-    return votes[1] > votes[0] ? 1 : 0;
+  function getRenderedTurns(scroller) {
+    return scroller
+      ? Array.from(scroller.querySelectorAll(TURN_SELECTOR)).filter(
+          (turn) =>
+            turn.getAttribute("data-turn-key") &&
+            belongsToConversation(turn),
+        )
+      : [];
   }
 
-  function trackTransientTurn(turns, userParity) {
-    const currentTurnIds = new Set(
-      turns.map((turn) =>
-        turn.getAttribute("data-turn-id-container"),
-      ),
+  function getTurnKey(turn) {
+    return turn.getAttribute("data-turn-key");
+  }
+
+  function findTurn(scroller, id) {
+    return scroller.querySelector(
+      `${TURN_SELECTOR}[data-turn-key="${CSS.escape(id)}"]`,
     );
-    for (const id of transientTurnIds) {
-      if (!currentTurnIds.has(id)) transientTurnIds.delete(id);
-    }
-
-    if (!globalThis.document?.querySelector(STOP_BUTTON_SELECTOR)) {
-      return;
-    }
-
-    const turn = turns[turns.length - 1];
-    const turnIndex = turns.length - 1;
-    if (
-      !turn ||
-      turnIndex % 2 !== userParity ||
-      turn.querySelector(USER_MESSAGE_SELECTOR)
-    ) {
-      return;
-    }
-
-    const id = turn.getAttribute("data-turn-id-container");
-    if (id) transientTurnIds.add(id);
   }
 
   function buildItems(turns) {
-    const userParity = inferUserParity(turns);
-    trackTransientTurn(turns, userParity);
+    const { mapping, domLabels } = conversation;
+    const renderedKeys = turns.map(getTurnKey);
     const nextItems = [];
 
-    turns.forEach((turn, turnIndex) => {
-      if (turnIndex % 2 !== userParity) return;
-      const id = turn.getAttribute("data-turn-id-container");
-      if (transientTurnIds.has(id)) return;
-
-      const message = turn.querySelector(USER_MESSAGE_SELECTOR);
-      const cached = labelCache.get(id);
-      const virtualizedMessage = message || cached?.label
-        ? null
-        : getVirtualizedUserMessage(turn);
-      const directLabel =
-        getMessageLabel(message) || virtualizedMessage?.label || "";
-      const userLabel = directLabel || cached?.label || "";
-
-      if (directLabel) {
-        labelCache.set(id, {
-          label: directLabel,
-          messageId:
-            message?.getAttribute("data-message-id") ||
-            virtualizedMessage?.messageId ||
-            id,
+    if (mapping) {
+      const anchorId = renderedKeys.findLast((key) => mapping[key]);
+      for (const id of getBranchPath(anchorId)) {
+        const message = mapping[id]?.message;
+        if (!isVisibleUserMessage(message)) continue;
+        nextItems.push({
+          id,
+          label: getApiMessageLabel(message) || domLabels.get(id) || "",
         });
       }
+    }
 
-      const assistantTurn = turns[turnIndex + 1];
-      const assistantLabel = userLabel
-        ? ""
-        : getAssistantFirstLineLabel(
-            assistantTurn?.querySelector(
-              ASSISTANT_MESSAGE_SELECTOR,
-            ),
-          );
-      const promptNumber = nextItems.length + 1;
-      const label =
-        userLabel || assistantLabel || `Prompt ${promptNumber}`;
-      const assistantTurnId = assistantTurn?.getAttribute(
-        "data-turn-id-container",
-      );
-      const useAssistantTurn = Boolean(
-        assistantLabel && assistantTurnId,
-      );
-      const messageId =
-        userLabel
-          ? message?.getAttribute("data-message-id") ||
-            virtualizedMessage?.messageId ||
-            cached?.messageId ||
-            id
-          : null;
+    const indexOf = (key) => nextItems.findIndex((item) => item.id === key);
+    renderedKeys.forEach((key, position) => {
+      if (indexOf(key) >= 0) return;
 
-      const activeTurnIds = [id];
-      if (assistantTurnId) activeTurnIds.push(assistantTurnId);
-
-      nextItems.push({
-        activeTurnIds,
-        fallbackTurnId: assistantTurnId || null,
-        id,
-        label,
-        messageId,
-        turnId: useAssistantTurn ? assistantTurnId : id,
-      });
+      const item = { id: key, label: domLabels.get(key) || "" };
+      const previousKey = renderedKeys
+        .slice(0, position)
+        .findLast((candidate) => indexOf(candidate) >= 0);
+      const nextKey = renderedKeys
+        .slice(position + 1)
+        .find((candidate) => indexOf(candidate) >= 0);
+      if (previousKey) nextItems.splice(indexOf(previousKey) + 1, 0, item);
+      else if (nextKey) nextItems.splice(indexOf(nextKey), 0, item);
+      else nextItems.push(item);
     });
 
+    nextItems.forEach((item, index) => {
+      if (!item.label) item.label = `Prompt ${index + 1}`;
+    });
     return nextItems;
   }
 
-  function hasNativeToc() {
-    for (const marker of document.querySelectorAll(
-      NATIVE_MARKER_SELECTOR,
-    )) {
-      if (!root?.contains(marker)) return true;
-    }
-    return false;
-  }
+  function collectRenderedTurns(turns) {
+    const { mapping, domLabels, requestedKeys } = conversation;
+    let hasUnknownTurn = false;
 
-  function hasAtLeastNativeThreshold(turns) {
-    const userParity = inferUserParity(turns);
-    trackTransientTurn(turns, userParity);
-    let promptCount = 0;
-
-    for (
-      let turnIndex = userParity;
-      turnIndex < turns.length;
-      turnIndex += 2
-    ) {
-      const id = turns[turnIndex].getAttribute(
-        "data-turn-id-container",
-      );
-      if (transientTurnIds.has(id)) continue;
-
-      promptCount += 1;
-      if (promptCount >= NATIVE_THRESHOLD) return true;
+    for (const turn of turns) {
+      const key = getTurnKey(turn);
+      const label = getBubbleLabel(turn.querySelector(BUBBLE_SELECTOR));
+      if (label) domLabels.set(key, label);
+      if (mapping && !mapping[key] && !requestedKeys.has(key)) {
+        requestedKeys.add(key);
+        hasUnknownTurn = true;
+      }
     }
 
-    return false;
-  }
-
-  function getScrollRoot(turns = getTurnContainers()) {
-    return (
-      turns[0]?.closest("[data-scroll-root]") ||
-      document.querySelector("[data-scroll-root]")
-    );
-  }
-
-  function getMaxHeight() {
-    const scrollRoot = getScrollRoot();
-    const height = scrollRoot?.getBoundingClientRect().height;
-    return Number.isFinite(height) && height > 0
-      ? `${height / 2}px`
-      : "50lvh";
+    if (hasUnknownTurn) scheduleRefetch();
   }
 
   function isPanelOpen() {
     return (
       items.length > 0 &&
-      (hovered || (focusTarget instanceof HTMLElement && focusTarget.isConnected))
+      (hovered ||
+        (focusTarget instanceof HTMLElement && focusTarget.isConnected))
     );
   }
 
-  function removeFallback() {
+  function ensureStyle() {
+    if (document.getElementById(STYLE_ID)) return;
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = STYLE;
+    document.head.append(style);
+  }
+
+  function removeRoot() {
     window.clearTimeout(closeTimer);
     closeTimer = 0;
     root?.remove();
@@ -406,23 +471,15 @@
     focusTarget = null;
     renderedSignature = "";
     items = [];
-    observedTurnSignature = "";
-    observedTurns = [];
-    observedScrollRoot = null;
-    intersectingTurnIds.clear();
-    turnObserver?.disconnect();
-    turnObserver = null;
-    if (jumpFrame) cancelAnimationFrame(jumpFrame);
-    jumpFrame = 0;
+    cancelJump();
   }
 
-  function ensureRoot(container) {
+  function ensureRoot() {
     if (root?.isConnected) return root;
 
+    ensureStyle();
     root = document.createElement("div");
     root.id = ROOT_ID;
-    root.className =
-      "fixed inset-e-4 top-1/2 z-20 -translate-y-1/2";
 
     root.addEventListener("mouseenter", () => {
       window.clearTimeout(closeTimer);
@@ -461,8 +518,38 @@
       renderView();
     });
 
-    container.prepend(root);
+    document.body.append(root);
     return root;
+  }
+
+  function positionRoot() {
+    const scroller = getScroller();
+    if (!root || !scroller) return;
+
+    const rect = scroller.getBoundingClientRect();
+    root.style.top = `${rect.top + rect.height / 2}px`;
+    root.style.right = `${
+      document.documentElement.clientWidth - rect.right + EDGE_OFFSET
+    }px`;
+  }
+
+  function getMaxHeight() {
+    const height = getScroller()?.getBoundingClientRect().height;
+    return Number.isFinite(height) && height > 0
+      ? `${height / 2}px`
+      : "50lvh";
+  }
+
+  function revealWithin(container, element) {
+    if (!container || !element) return;
+
+    const containerRect = container.getBoundingClientRect();
+    const elementRect = element.getBoundingClientRect();
+    if (elementRect.top < containerRect.top) {
+      container.scrollTop += elementRect.top - containerRect.top;
+    } else if (elementRect.bottom > containerRect.bottom) {
+      container.scrollTop += elementRect.bottom - containerRect.bottom;
+    }
   }
 
   function setActiveItem(id) {
@@ -474,182 +561,150 @@
   function applyActiveState() {
     if (!root) return;
 
-    const markers = Array.from(
-      root.querySelectorAll(NATIVE_MARKER_SELECTOR),
-    );
-    const menuButtons = Array.from(
-      root.querySelectorAll("button.__menu-item"),
-    );
+    const markers = Array.from(root.querySelectorAll(".ctoc-marker"));
+    const menuButtons = Array.from(root.querySelectorAll(".ctoc-item"));
+    const activeIndex = items.findIndex((item) => item.id === activeItemId);
 
-    items.forEach((item, index) => {
-      const active = item.id === activeItemId;
-      const marker = markers[index];
-      const menuButton = menuButtons[index];
-
-      if (marker) {
-        marker.className = [
-          "h-0.5 w-4.5 shrink-0 rounded-full transition-all",
-          active
-            ? "bg-token-text-primary"
-            : "bg-token-text-tertiary/60 hover:bg-token-text-secondary",
-        ].join(" ");
-        marker.toggleAttribute("data-toc-active", active);
-      }
-
-      if (menuButton) {
-        menuButton.toggleAttribute("data-active", active);
-        menuButton.toggleAttribute("data-toc-active", active);
-      }
+    markers.forEach((marker, index) => {
+      marker.toggleAttribute("data-active", index === activeIndex);
     });
+    menuButtons.forEach((button, index) => {
+      button.toggleAttribute("data-active", index === activeIndex);
+    });
+
+    revealWithin(root.querySelector(".ctoc-rail"), markers[activeIndex]);
+    revealWithin(root.querySelector(".ctoc-menu"), menuButtons[activeIndex]);
+  }
+
+  function cancelJump() {
+    jumpRequest += 1;
+    if (jumpFrame) cancelAnimationFrame(jumpFrame);
+    jumpFrame = 0;
+  }
+
+  function moveToward(scroller, targetIndex) {
+    const indexById = new Map(items.map((item, index) => [item.id, index]));
+    const turns = getRenderedTurns(scroller).filter((turn) =>
+      indexById.has(getTurnKey(turn)),
+    );
+    const rect = scroller.getBoundingClientRect();
+
+    if (turns.length === 0) {
+      scroller.scrollTop -= rect.height;
+      return;
+    }
+
+    const first = turns[0];
+    const last = turns[turns.length - 1];
+    if (targetIndex < indexById.get(getTurnKey(first))) {
+      scroller.scrollTop +=
+        Math.min(first.getBoundingClientRect().top - rect.bottom, 0) - 1;
+    } else {
+      scroller.scrollTop +=
+        Math.max(last.getBoundingClientRect().bottom - rect.top, 0) + 1;
+    }
+  }
+
+  function getContentTop(scroller) {
+    const scrollerTop = scroller.getBoundingClientRect().top;
+    const headerBottom =
+      document.querySelector(HEADER_SELECTOR)?.getBoundingClientRect()
+        .bottom ?? scrollerTop;
+    return Math.max(scrollerTop, headerBottom);
   }
 
   function selectItem(item) {
+    cancelJump();
     setActiveItem(item.id);
-    jumpRequest += 1;
+    lockedItemId = item.id;
+
     const request = jumpRequest;
     const startedAt = performance.now();
     let stableFrames = 0;
 
-    if (jumpFrame) cancelAnimationFrame(jumpFrame);
-
-    const align = () => {
+    const step = () => {
+      jumpFrame = 0;
       if (request !== jumpRequest) return;
 
-      const scrollRoot = getScrollRoot();
-      if (!scrollRoot) return;
+      const scroller = getScroller();
+      const targetIndex = items.findIndex(
+        (candidate) => candidate.id === item.id,
+      );
+      if (!scroller || targetIndex < 0) return;
 
-      const message = item.messageId
-        ? scrollRoot.querySelector(
-            `[data-message-id="${CSS.escape(item.messageId)}"]`,
-          )
-        : null;
-      const turnIds = [item.turnId, item.fallbackTurnId].filter(Boolean);
-      const turn = turnIds
-        .map((turnId) =>
-          scrollRoot.querySelector(
-            `[data-turn-id-container="${CSS.escape(turnId)}"]`,
-          ),
-        )
-        .find(Boolean);
-      const target = message || turn;
-      if (!target) return;
-
-      let delta = 0;
-      if (message instanceof HTMLElement) {
-        const previousMargin = message.style.scrollMarginTop;
-        const scrollPadding =
-          Number.parseFloat(getComputedStyle(scrollRoot).scrollPaddingTop) ||
-          0;
-        const offset = scrollPadding + SCROLL_OFFSET;
-        message.style.scrollMarginTop = `${offset}px`;
-        message.scrollIntoView({
-          behavior: "instant",
-          block: "start",
-          inline: "nearest",
-        });
-        delta =
-          message.getBoundingClientRect().top -
-          scrollRoot.getBoundingClientRect().top -
-          offset;
-        if (Math.abs(delta) > 2) {
-          scrollRoot.scrollTo({
-            left: scrollRoot.scrollLeft,
-            top: scrollRoot.scrollTop + delta,
-            behavior: "instant",
-          });
-        }
-        requestAnimationFrame(() => {
-          if (message.isConnected) {
-            message.style.scrollMarginTop = previousMargin;
-          }
-        });
+      const turn = findTurn(scroller, item.id);
+      if (turn) {
+        const target = turn.querySelector(BUBBLE_SELECTOR) || turn;
+        const delta =
+          target.getBoundingClientRect().top -
+          getContentTop(scroller) -
+          SCROLL_OFFSET;
+        const before = scroller.scrollTop;
+        if (Math.abs(delta) > 2) scroller.scrollTop = before + delta;
+        const settled =
+          Math.abs(delta) <= 2 || Math.abs(scroller.scrollTop - before) < 1;
+        stableFrames = settled ? stableFrames + 1 : 0;
+        if (stableFrames >= 3) return;
       } else {
-        target.scrollIntoView({
-          behavior: "instant",
-          block: "start",
-          inline: "nearest",
-        });
+        stableFrames = 0;
+        moveToward(scroller, targetIndex);
       }
 
-      stableFrames =
-        message instanceof HTMLElement && Math.abs(delta) <= 2
-          ? stableFrames + 1
-          : 0;
-      if (
-        performance.now() - startedAt < 1500 &&
-        (performance.now() - startedAt < 350 || stableFrames < 3)
-      ) {
-        jumpFrame = requestAnimationFrame(align);
-      } else {
-        jumpFrame = 0;
+      if (performance.now() - startedAt < SEEK_TIMEOUT) {
+        jumpFrame = requestAnimationFrame(step);
       }
     };
 
-    align();
+    step();
   }
 
   function renderView() {
     if (!root?.isConnected) return;
 
-    const panelOpen = isPanelOpen();
     const maxHeight = getMaxHeight();
     const shell = document.createElement("div");
-    shell.className = "relative flex items-start";
+    shell.className = "ctoc-shell";
 
-    const viewport = document.createElement("div");
-    viewport.className = "max-h-[50lvh] w-9 overflow-clip";
-    viewport.style.maxHeight = maxHeight;
+    const rail = document.createElement("div");
+    rail.className = "ctoc-rail";
+    rail.style.maxHeight = maxHeight;
 
     const markerList = document.createElement("div");
-    markerList.className = "flex flex-col items-center gap-2 py-1";
+    markerList.className = "ctoc-markers";
 
-    items.forEach((item, index) => {
+    items.forEach((item) => {
       const marker = document.createElement("button");
       marker.type = "button";
-      marker.className =
-        "h-0.5 w-4.5 shrink-0 rounded-full transition-all";
+      marker.className = "ctoc-marker";
       marker.setAttribute("aria-label", item.label);
-      marker.dataset.tocItemIndex = String(index);
       marker.addEventListener("click", () => selectItem(item));
       markerList.append(marker);
     });
 
-    viewport.append(markerList);
-    shell.append(viewport);
+    rail.append(markerList);
+    shell.append(rail);
 
-    if (panelOpen) {
+    if (isPanelOpen()) {
       const panel = document.createElement("div");
-      panel.className = [
-        "z-50 max-w-xs rounded-2xl popover",
-        "bg-token-main-surface-primary dark:bg-[#353535]",
-        "shadow-long py-1.5 select-none absolute top-1/2",
-        "z-10 max-w-85 min-w-60 -translate-y-1/2 inset-e-0",
-      ].join(" ");
+      panel.className = "ctoc-panel";
 
       const menu = document.createElement("ul");
-      menu.className =
-        "flex max-h-[50lvh] flex-col overflow-y-auto";
+      menu.className = "ctoc-menu";
       menu.style.maxHeight = maxHeight;
 
       items.forEach((item) => {
         const listItem = document.createElement("li");
         const button = document.createElement("button");
-        button.tabIndex = 0;
-        button.setAttribute("data-fill", "");
-        button.className =
-          "group __menu-item hoverable w-full text-start";
+        button.type = "button";
+        button.className = "ctoc-item";
         button.addEventListener("click", () => selectItem(item));
 
-        const content = document.createElement("div");
-        content.className =
-          "flex min-w-0 grow items-center gap-2.5";
         const label = document.createElement("div");
-        label.className = "truncate";
+        label.className = "ctoc-label";
         label.textContent = item.label;
         enableOverflowTitle(label);
 
-        content.append(label);
-        button.append(content);
+        button.append(label);
         listItem.append(button);
         menu.append(listItem);
       });
@@ -658,304 +713,158 @@
       shell.append(panel);
     }
 
-    root.dataset.turnCount = String(items.length);
     root.replaceChildren(shell);
     applyActiveState();
   }
 
-  function updateActiveFromIntersections(turns) {
-    const activeTurn = turns.find((turn) =>
-      intersectingTurnIds.has(
-        turn.getAttribute("data-turn-id-container"),
-      ),
-    );
-    const activeTurnId = activeTurn?.getAttribute(
-      "data-turn-id-container",
-    );
-    const activeItem = items.find((item) =>
-      item.activeTurnIds.includes(activeTurnId),
-    );
-    if (activeItem) setActiveItem(activeItem.id);
-  }
-
-  function updateActiveFromGeometry(turns, scrollRoot) {
-    const rootRect = scrollRoot?.getBoundingClientRect();
-    if (!rootRect) return;
-    const readingLine = (rootRect.top + rootRect.bottom) / 2;
-    const activeTurn = turns.find((turn) => {
-      const rect = turn.getBoundingClientRect();
-      return rect.top <= readingLine && rect.bottom >= readingLine;
-    });
-    const activeTurnId = activeTurn?.getAttribute(
-      "data-turn-id-container",
-    );
-    const activeItem = items.find((item) =>
-      item.activeTurnIds.includes(activeTurnId),
-    );
-    setActiveItem(activeItem?.id || items[0]?.id);
-  }
-
-  function syncTurnObserver(turns) {
-    const scrollRoot = getScrollRoot(turns);
-    const signature = turns
-      .map((turn) => turn.getAttribute("data-turn-id-container"))
-      .join("|");
-    if (
-      signature === observedTurnSignature &&
-      turns.length === observedTurns.length &&
-      turns.every((turn, index) => turn === observedTurns[index]) &&
-      scrollRoot === observedScrollRoot
-    ) {
+  function updateActive() {
+    activeFrame = 0;
+    if (!root) return;
+    if (lockedItemId && items.some((item) => item.id === lockedItemId)) {
+      setActiveItem(lockedItemId);
       return;
     }
 
-    turnObserver?.disconnect();
-    turnObserver = null;
-    intersectingTurnIds = new Set();
-    observedTurnSignature = signature;
-    observedTurns = turns;
-    observedScrollRoot = scrollRoot;
-
-    if (!scrollRoot || turns.length === 0) return;
-
-    turnObserver = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          const id = entry.target.getAttribute(
-            "data-turn-id-container",
-          );
-          if (!id) return;
-          if (entry.isIntersecting) intersectingTurnIds.add(id);
-          else intersectingTurnIds.delete(id);
-        });
-        updateActiveFromIntersections(turns);
-      },
-      {
-        root: scrollRoot,
-        rootMargin: "-49% 0px -49% 0px",
-        threshold: 0,
-      },
+    const scroller = getScroller();
+    if (!scroller) return;
+    const rect = scroller.getBoundingClientRect();
+    const readingLine = rect.top + rect.height / 2;
+    const itemIds = new Set(items.map((item) => item.id));
+    const turns = getRenderedTurns(scroller).filter((turn) =>
+      itemIds.has(getTurnKey(turn)),
     );
 
-    turns.forEach((turn) => turnObserver.observe(turn));
-    updateActiveFromGeometry(turns, scrollRoot);
+    const lastTurn = turns[turns.length - 1];
+    const atEnd =
+      lastTurn &&
+      getTurnKey(lastTurn) === items[items.length - 1].id &&
+      lastTurn.getBoundingClientRect().bottom <= rect.bottom + 2;
+
+    let activeTurn = turns[0];
+    for (const turn of turns) {
+      if (turn.getBoundingClientRect().top > readingLine) break;
+      activeTurn = turn;
+    }
+    if (atEnd) activeTurn = lastTurn;
+    setActiveItem(activeTurn ? getTurnKey(activeTurn) : items[0]?.id);
+  }
+
+  function scheduleActiveUpdate() {
+    if (activeFrame) return;
+    activeFrame = requestAnimationFrame(updateActive);
+  }
+
+  function checkForNavigation() {
+    const id = getConversationId();
+    if (id === conversation.id) return false;
+
+    window.clearTimeout(conversation.refetchTimer);
+    conversation = createConversationState(id);
+    activeItemId = null;
+    lockedItemId = null;
+    removeRoot();
+    loadConversation();
+    return true;
   }
 
   function update() {
     updateFrame = 0;
+    checkForNavigation();
 
-    if (mode !== "fallback" || checkForNavigation()) return;
+    const scroller = getScroller();
+    if (scroller !== observedScroller) {
+      if (observedScroller) resizeObserver.unobserve(observedScroller);
+      if (scroller) resizeObserver.observe(scroller);
+      observedScroller = scroller;
+    }
 
-    if (!desktop.matches || hasNativeToc()) {
-      enterHandoff();
+    if (!desktop.matches || !scroller) {
+      removeRoot();
       return;
     }
 
-    const turns = getTurnContainers();
+    const turns = getRenderedTurns(scroller);
+    collectRenderedTurns(turns);
     const nextItems = buildItems(turns);
-    if (nextItems.length >= NATIVE_THRESHOLD) {
-      enterHandoff();
-      return;
-    }
     if (nextItems.length === 0) {
-      removeFallback();
-      return;
-    }
-
-    const container =
-      turns[0]?.parentElement || document.getElementById("thread");
-    if (!container) {
-      removeFallback();
+      removeRoot();
       return;
     }
 
     items = nextItems;
-    const signature = `${location.pathname}|${items
+    ensureRoot();
+    positionRoot();
+    const signature = items
       .map((item) => `${item.id}:${item.label}`)
-      .join("|")}`;
-    ensureRoot(container);
+      .join("|");
     if (signature !== renderedSignature) {
       renderedSignature = signature;
       renderView();
     }
-    syncTurnObserver(turns);
+    updateActive();
   }
 
   function scheduleUpdate() {
-    if (mode !== "fallback" || updateFrame) return;
+    if (updateFrame) return;
     updateFrame = requestAnimationFrame(update);
   }
 
-  function containsRelevantNode(node) {
-    if (!(node instanceof Element)) return false;
-    if (node.id === ROOT_ID || node.closest(`#${ROOT_ID}`)) return false;
-    return (
-      node.matches(ACTIVE_RELEVANT_NODE_SELECTOR) ||
-      Boolean(node.querySelector(ACTIVE_RELEVANT_NODE_SELECTOR))
-    );
+  function isOwnMutation(mutation) {
+    const target =
+      mutation.target instanceof Element
+        ? mutation.target
+        : mutation.target.parentElement;
+    return Boolean(target?.closest(`#${ROOT_ID}`));
   }
 
-  function containsHandoffRelevantNode(node) {
-    if (!(node instanceof Element)) return false;
-    return (
-      node.matches(HANDOFF_RELEVANT_NODE_SELECTOR) ||
-      Boolean(node.querySelector(HANDOFF_RELEVANT_NODE_SELECTOR))
-    );
-  }
-
-  function nodeListContainsRelevantNode(nodes, predicate) {
-    for (const node of nodes) {
-      if (predicate(node)) return true;
+  function releaseJump(event) {
+    if (!(event.target instanceof Node)) return;
+    if (root?.contains(event.target)) return;
+    if (!getScroller()?.contains(event.target)) return;
+    cancelJump();
+    if (lockedItemId) {
+      lockedItemId = null;
+      scheduleActiveUpdate();
     }
-    return false;
   }
 
-  function hasRelevantNodeMutation(mutation, predicate) {
-    return (
-      nodeListContainsRelevantNode(mutation.addedNodes, predicate) ||
-      nodeListContainsRelevantNode(mutation.removedNodes, predicate)
-    );
-  }
-
-  function stopActiveObserver() {
-    activeObserver?.disconnect();
-    activeObserver = null;
-  }
-
-  function stopHandoffObserver() {
-    handoffObserver?.disconnect();
-    handoffObserver = null;
-  }
-
-  function startActiveObserver() {
-    if (activeObserver) return;
-
-    activeObserver = new MutationObserver((mutations) => {
-      if (checkForNavigation()) return;
-
-      for (const mutation of mutations) {
-        const mutationElement =
-          mutation.target instanceof Element
-            ? mutation.target
-            : mutation.target.parentElement;
-        if (mutationElement?.closest(`#${ROOT_ID}`)) continue;
-        if (
-          mutationElement?.closest(
-            `${USER_MESSAGE_SELECTOR}, ${ASSISTANT_MESSAGE_SELECTOR}`,
-          )
-        ) {
-          scheduleUpdate();
-          return;
-        }
-        if (hasRelevantNodeMutation(mutation, containsRelevantNode)) {
-          scheduleUpdate();
-          return;
-        }
-      }
-    });
-
-    activeObserver.observe(document.documentElement, {
-      characterData: true,
-      childList: true,
-      subtree: true,
-    });
-  }
-
-  function scheduleHandoffCheck() {
-    if (mode !== "handoff" || handoffFrame) return;
-    handoffFrame = requestAnimationFrame(checkHandoffState);
-  }
-
-  function startHandoffObserver() {
-    if (handoffObserver) return;
-
-    handoffObserver = new MutationObserver((mutations) => {
-      for (const mutation of mutations) {
-        if (
-          mutation.type === "attributes" &&
-          HANDOFF_ATTRIBUTE_NAMES.has(mutation.attributeName)
-        ) {
-          scheduleHandoffCheck();
-          return;
-        }
-        if (
-          mutation.type === "childList" &&
-          hasRelevantNodeMutation(mutation, containsHandoffRelevantNode)
-        ) {
-          scheduleHandoffCheck();
-          return;
-        }
-      }
-    });
-
-    handoffObserver.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: Array.from(HANDOFF_ATTRIBUTE_NAMES),
-      childList: true,
-      subtree: true,
-    });
-  }
-
-  function enterHandoff() {
-    if (mode === "handoff") return;
-
-    if (updateFrame) cancelAnimationFrame(updateFrame);
-    updateFrame = 0;
-    stopActiveObserver();
-    removeFallback();
-    mode = "handoff";
-    startHandoffObserver();
-  }
-
-  function leaveHandoff() {
-    if (mode !== "handoff") return;
-
-    if (handoffFrame) cancelAnimationFrame(handoffFrame);
-    handoffFrame = 0;
-    stopHandoffObserver();
-    mode = "fallback";
-    startActiveObserver();
-  }
-
-  function checkForNavigation() {
-    if (location.href === lastUrl) return false;
-
-    lastUrl = location.href;
-    labelCache = new Map();
-    transientTurnIds = new Set();
-    activeItemId = null;
-    renderedSignature = "";
-    removeFallback();
-    leaveHandoff();
+  new MutationObserver((mutations) => {
+    if (mutations.every(isOwnMutation)) return;
     scheduleUpdate();
-    return true;
-  }
-
-  function checkHandoffState() {
-    handoffFrame = 0;
-    if (checkForNavigation() || !desktop.matches) return;
-
-    const turns = getTurnContainers();
-    if (hasNativeToc() || hasAtLeastNativeThreshold(turns)) return;
-
-    leaveHandoff();
-    scheduleUpdate();
-  }
-
-  function refreshState() {
-    if (checkForNavigation()) return;
-    if (mode === "handoff") scheduleHandoffCheck();
-    else scheduleUpdate();
-  }
-
-  startActiveObserver();
-  desktop.addEventListener("change", refreshState);
-  window.addEventListener("popstate", refreshState);
-  window.addEventListener("pageshow", refreshState);
-  window.addEventListener("resize", () => {
-    if (mode === "fallback" && root) renderView();
+  }).observe(document.body, {
+    characterData: true,
+    childList: true,
+    subtree: true,
   });
-  window.setInterval(checkForNavigation, 1000);
+
+  document.addEventListener(
+    "scroll",
+    (event) => {
+      if (
+        event.target instanceof Element &&
+        event.target.matches(SCROLLER_SELECTOR)
+      ) {
+        scheduleActiveUpdate();
+      }
+    },
+    { capture: true, passive: true },
+  );
+  for (const type of ["wheel", "touchstart", "keydown", "pointerdown"]) {
+    document.addEventListener(type, releaseJump, {
+      capture: true,
+      passive: true,
+    });
+  }
+  desktop.addEventListener("change", scheduleUpdate);
+  window.addEventListener("popstate", scheduleUpdate);
+  window.addEventListener("pageshow", scheduleUpdate);
+  window.addEventListener("resize", () => {
+    positionRoot();
+    if (root) renderView();
+  });
+  window.setInterval(() => {
+    if (checkForNavigation()) scheduleUpdate();
+  }, 500);
 
   scheduleUpdate();
 })();

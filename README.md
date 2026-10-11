@@ -1,12 +1,12 @@
 # ChatGPT Table of Contents
 
-Display ChatGPT’s conversation table of contents on the right starting from the first user message, without waiting until the fifth message. Match the native ChatGPT web interface style.
+Display a conversation table of contents on the right side of ChatGPT, starting from the first user message. Match the native ChatGPT web interface style.
 
-Once the conversation reaches five user messages, the script stops rendering its custom table of contents and hands control over to ChatGPT’s native implementation.
+The table of contents covers the whole conversation as soon as it opens, including earlier messages that ChatGPT has not loaded yet. Clicking an entry jumps to that message and loads it on demand.
 
-从第一条提问开始显示 ChatGPT 右侧的对话目录，不必等到第五条提问。参考网页版原生样式实现。
+在 ChatGPT 网页版右侧显示对话目录，从第一条提问开始。参考网页版原生样式实现。
 
-用户提问达到 5 条时，脚本会停止自制对话目录，交由 ChatGPT 网页接管
+打开对话后，目录立即列出整个对话的所有提问，包括网页尚未加载的较早消息；点击目录项即可跳转，并按需加载对应消息。
 
 ## Screenshot Preview / 截图预览
 
