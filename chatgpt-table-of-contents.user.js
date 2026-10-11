@@ -2,7 +2,7 @@
 // @name         ChatGPT Table of Contents
 // @name:zh-CN   ChatGPT 对话目录
 // @namespace    https://github.com/Jujuanel/chatgpt-table-of-contents
-// @version      2.0.0
+// @version      2.1.0
 // @description  Show a native-style Table of contents on the right of ChatGPT conversations, starting from the first prompt and covering the whole conversation.
 // @description:zh-CN 在 ChatGPT 网页版右侧显示对话目录，从第一条提问开始，覆盖整个对话。参考网页版原生样式实现。
 // @author       Jujuanel
@@ -31,6 +31,8 @@
   const EDGE_OFFSET = 16;
   const SEEK_TIMEOUT = 8000;
   const REFETCH_DELAY = 800;
+  const HIGHLIGHT_HOLD = 1200;
+  const HIGHLIGHT_FADE = 400;
   const desktop = window.matchMedia("(min-width: 1024px)");
 
   const STYLE = `
@@ -126,6 +128,16 @@
     #${ROOT_ID} .ctoc-item[data-active] {
       background-color: var(--color-background-primary-ghost-hover);
     }
+    ${BUBBLE_SELECTOR}[data-ctoc-highlight] {
+      transition: background-color ${HIGHLIGHT_FADE}ms ease;
+    }
+    ${BUBBLE_SELECTOR}[data-ctoc-highlight="on"] {
+      background-color: color-mix(
+        in srgb,
+        var(--color-background-user-message),
+        var(--color-background-accent-action) 30%
+      );
+    }
     #${ROOT_ID} .ctoc-label {
       min-width: 0;
       overflow: hidden;
@@ -148,6 +160,8 @@
   let renderedSignature = "";
   let observedScroller = null;
   let accessToken = null;
+  let highlightedBubble = null;
+  let highlightTimer = 0;
   let conversation = createConversationState(null);
 
   const resizeObserver = new ResizeObserver(() => positionRoot());
@@ -605,6 +619,23 @@
     }
   }
 
+  function clearHighlight() {
+    window.clearTimeout(highlightTimer);
+    highlightTimer = 0;
+    highlightedBubble?.removeAttribute("data-ctoc-highlight");
+    highlightedBubble = null;
+  }
+
+  function highlightBubble(bubble) {
+    clearHighlight();
+    highlightedBubble = bubble;
+    bubble.setAttribute("data-ctoc-highlight", "on");
+    highlightTimer = window.setTimeout(() => {
+      bubble.setAttribute("data-ctoc-highlight", "off");
+      highlightTimer = window.setTimeout(clearHighlight, HIGHLIGHT_FADE);
+    }, HIGHLIGHT_HOLD);
+  }
+
   function getContentTop(scroller) {
     const scrollerTop = scroller.getBoundingClientRect().top;
     const headerBottom =
@@ -644,7 +675,10 @@
         const settled =
           Math.abs(delta) <= 2 || Math.abs(scroller.scrollTop - before) < 1;
         stableFrames = settled ? stableFrames + 1 : 0;
-        if (stableFrames >= 3) return;
+        if (stableFrames >= 3) {
+          if (target.matches(BUBBLE_SELECTOR)) highlightBubble(target);
+          return;
+        }
       } else {
         stableFrames = 0;
         moveToward(scroller, targetIndex);
