@@ -2,12 +2,13 @@
 // @name         ChatGPT Table of Contents
 // @name:zh-CN   ChatGPT 对话目录
 // @namespace    https://github.com/Jujuanel/chatgpt-table-of-contents
-// @version      2.1.0
+// @version      2.1.1
 // @description  Show a native-style Table of contents on the right of ChatGPT conversations, starting from the first prompt and covering the whole conversation.
 // @description:zh-CN 在 ChatGPT 网页版右侧显示对话目录，从第一条提问开始，覆盖整个对话。参考网页版原生样式实现。
 // @author       Jujuanel
 // @license      MIT
 // @match        https://chatgpt.com/*
+// @icon         https://chatgpt.com/favicon.ico
 // @run-at       document-idle
 // @grant        none
 // @noframes
