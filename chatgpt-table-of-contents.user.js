@@ -2,7 +2,7 @@
 // @name         ChatGPT Table of Contents
 // @name:zh-CN   ChatGPT 对话目录
 // @namespace    https://github.com/Jujuanel/chatgpt-table-of-contents
-// @version      2.1.1
+// @version      2.1.2
 // @description  Show a native-style Table of contents on the right of ChatGPT conversations, starting from the first prompt and covering the whole conversation.
 // @description:zh-CN 在 ChatGPT 网页版右侧显示对话目录，从第一条提问开始，覆盖整个对话。参考网页版原生样式实现。
 // @author       Jujuanel
@@ -24,6 +24,7 @@
   const BUBBLE_SELECTOR = "[data-user-message-bubble]";
   const HEADER_SELECTOR = "header[data-app-shell-titlebar]";
   const CONVERSATION_ATTRIBUTE = "data-chatgpt-selection-conversation-id";
+  const LOCAL_OWNER_PREFIX = "local-";
   const CONVERSATION_PATH_PATTERN = /\/c\/([0-9a-f-]{36})(?:[/?#]|$)/i;
   const VISIBLE_CONTENT_TYPES = new Set(["text", "multimodal_text"]);
   const LABEL_LIMIT = 60;
@@ -164,6 +165,7 @@
   let highlightedBubble = null;
   let highlightTimer = 0;
   let conversation = createConversationState(null);
+  const ownerAliases = new Map();
 
   const resizeObserver = new ResizeObserver(() => positionRoot());
   const mediaPointerPattern =
@@ -378,21 +380,56 @@
     );
   }
 
-  function belongsToConversation(turn) {
-    const owner = turn
+  function getTurnOwner(turn) {
+    return turn
       .querySelector(`[${CONVERSATION_ATTRIBUTE}]`)
       ?.getAttribute(CONVERSATION_ATTRIBUTE);
-    return !owner || owner === conversation.id;
+  }
+
+  function belongsToConversation(turn) {
+    const owner = getTurnOwner(turn);
+    return (
+      !owner ||
+      owner === conversation.id ||
+      ownerAliases.get(owner) === conversation.id
+    );
+  }
+
+  function getKeyedTurns(scroller) {
+    return scroller
+      ? Array.from(scroller.querySelectorAll(TURN_SELECTOR)).filter((turn) =>
+          turn.getAttribute("data-turn-key"),
+        )
+      : [];
   }
 
   function getRenderedTurns(scroller) {
-    return scroller
-      ? Array.from(scroller.querySelectorAll(TURN_SELECTOR)).filter(
-          (turn) =>
-            turn.getAttribute("data-turn-key") &&
-            belongsToConversation(turn),
-        )
-      : [];
+    return getKeyedTurns(scroller).filter(belongsToConversation);
+  }
+
+  // A conversation started from the new-chat page keeps a client-side owner
+  // id until reload. Its turn keys are message ids, so a turn found in the
+  // conversation mapping ties that owner to the conversation.
+  function resolveLocalOwners(scroller) {
+    const { id, mapping, requestedKeys } = conversation;
+    if (!id || !mapping) return;
+
+    let hasUnknownTurn = false;
+    for (const turn of getKeyedTurns(scroller)) {
+      const owner = getTurnOwner(turn);
+      if (!owner?.startsWith(LOCAL_OWNER_PREFIX) || ownerAliases.has(owner)) {
+        continue;
+      }
+      const key = getTurnKey(turn);
+      if (mapping[key]) {
+        ownerAliases.set(owner, id);
+      } else if (!requestedKeys.has(key)) {
+        requestedKeys.add(key);
+        hasUnknownTurn = true;
+      }
+    }
+
+    if (hasUnknownTurn) scheduleRefetch();
   }
 
   function getTurnKey(turn) {
@@ -818,6 +855,7 @@
       return;
     }
 
+    resolveLocalOwners(scroller);
     const turns = getRenderedTurns(scroller);
     collectRenderedTurns(turns);
     const nextItems = buildItems(turns);
